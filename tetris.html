@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>テトリス</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: 'Courier New', monospace;
+      color: #eee;
+    }
+    #game-container {
+      display: flex;
+      gap: 24px;
+      align-items: flex-start;
+    }
+    canvas {
+      border: 2px solid #444;
+      background: #0f0f1a;
+      display: block;
+    }
+    #side-panel {
+      width: 140px;
+    }
+    .panel-box {
+      background: #0f0f1a;
+      border: 2px solid #444;
+      padding: 12px;
+      margin-bottom: 16px;
+      border-radius: 4px;
+    }
+    .panel-box h3 {
+      font-size: 11px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+    .panel-box .value {
+      font-size: 24px;
+      font-weight: bold;
+      color: #fff;
+    }
+    #next-canvas {
+      display: block;
+      margin: 0 auto;
+    }
+    #controls {
+      font-size: 11px;
+      color: #666;
+      line-height: 1.8;
+    }
+    #controls span {
+      color: #aaa;
+    }
+    #message {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.85);
+      padding: 24px 32px;
+      border: 2px solid #555;
+      border-radius: 8px;
+      text-align: center;
+      display: none;
+    }
+    #message h2 { font-size: 22px; margin-bottom: 12px; }
+    #message p { color: #aaa; font-size: 13px; }
+    #message .score-disp { font-size: 28px; color: #ffd700; margin: 8px 0; }
+  </style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="board" width="300" height="600"></canvas>
+  <div id="side-panel">
+    <div class="panel-box">
+      <h3>Next</h3>
+      <canvas id="next-canvas" width="100" height="100"></canvas>
+    </div>
+    <div class="panel-box">
+      <h3>Score</h3>
+      <div class="value" id="score">0</div>
+    </div>
+    <div class="panel-box">
+      <h3>Level</h3>
+      <div class="value" id="level">1</div>
+    </div>
+    <div class="panel-box">
+      <h3>Lines</h3>
+      <div class="value" id="lines">0</div>
+    </div>
+    <div class="panel-box" id="controls">
+      <h3>Controls</h3>
+      <span>← →</span> 移動<br>
+      <span>↑</span> 回転<br>
+      <span>↓</span> 落下<br>
+      <span>Space</span> 即落下<br>
+      <span>P</span> 一時停止
+    </div>
+  </div>
+</div>
+
+<div id="message">
+  <h2 id="msg-title">Game Over</h2>
+  <div class="score-disp" id="msg-score"></div>
+  <p id="msg-sub">Enterキーでリスタート</p>
+</div>
+
+<script>
+const COLS = 10, ROWS = 20, BLOCK = 30;
+const COLORS = [
+  null,
+  '#00f5ff', // I - cyan
+  '#ffd700', // O - yellow
+  '#a855f7', // T - purple
+  '#22c55e', // S - green
+  '#ef4444', // Z - red
+  '#3b82f6', // J - blue
+  '#f97316', // L - orange
+];
+
+const SHAPES = [
+  null,
+  [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]], // I
+  [[1,1],[1,1]],                               // O
+  [[0,1,0],[1,1,1],[0,0,0]],                   // T
+  [[0,1,1],[1,1,0],[0,0,0]],                   // S
+  [[1,1,0],[0,1,1],[0,0,0]],                   // Z
+  [[1,0,0],[1,1,1],[0,0,0]],                   // J
+  [[0,0,1],[1,1,1],[0,0,0]],                   // L
+];
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const nextCanvas = document.getElementById('next-canvas');
+const nextCtx = nextCanvas.getContext('2d');
+
+let board, piece, nextPiece, score, level, lines, gameOver, paused, dropInterval, lastTime, animId;
+
+function init() {
+  board = Array.from({length: ROWS}, () => Array(COLS).fill(0));
+  score = 0; level = 1; lines = 0;
+  gameOver = false; paused = false;
+  dropInterval = 800;
+  lastTime = 0;
+  piece = spawnPiece();
+  nextPiece = spawnPiece();
+  updateUI();
+  document.getElementById('message').style.display = 'none';
+  if (animId) cancelAnimationFrame(animId);
+  animId = requestAnimationFrame(loop);
+}
+
+function spawnPiece() {
+  const type = Math.floor(Math.random() * 7) + 1;
+  const shape = SHAPES[type].map(r => [...r]);
+  return {
+    type, shape,
+    x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2),
+    y: 0
+  };
+}
+
+function rotate(shape) {
+  const N = shape.length;
+  return shape[0].map((_, c) => shape.map((row, r) => shape[N - 1 - r][c]));
+}
+
+function valid(p, dx=0, dy=0, shape=null) {
+  shape = shape || p.shape;
+  for (let r = 0; r < shape.length; r++) {
+    for (let c = 0; c < shape[r].length; c++) {
+      if (!shape[r][c]) continue;
+      const nx = p.x + c + dx, ny = p.y + r + dy;
+      if (nx < 0 || nx >= COLS || ny >= ROWS) return false;
+      if (ny >= 0 && board[ny][nx]) return false;
+    }
+  }
+  return true;
+}
+
+function lock() {
+  for (let r = 0; r < piece.shape.length; r++)
+    for (let c = 0; c < piece.shape[r].length; c++)
+      if (piece.shape[r][c]) {
+        if (piece.y + r < 0) { showGameOver(); return; }
+        board[piece.y + r][piece.x + c] = piece.type;
+      }
+  clearLines();
+  piece = nextPiece;
+  nextPiece = spawnPiece();
+  if (!valid(piece)) { showGameOver(); }
+}
+
+function clearLines() {
+  let cleared = 0;
+  for (let r = ROWS - 1; r >= 0; r--) {
+    if (board[r].every(v => v)) {
+      board.splice(r, 1);
+      board.unshift(Array(COLS).fill(0));
+      cleared++; r++;
+    }
+  }
+  if (cleared) {
+    const pts = [0, 100, 300, 500, 800];
+    score += (pts[cleared] || 800) * level;
+    lines += cleared;
+    level = Math.floor(lines / 10) + 1;
+    dropInterval = Math.max(100, 800 - (level - 1) * 70);
+    updateUI();
+  }
+}
+
+function hardDrop() {
+  while (valid(piece, 0, 1)) piece.y++;
+  lock();
+}
+
+function loop(ts) {
+  if (gameOver || paused) return;
+  if (ts - lastTime > dropInterval) {
+    if (valid(piece, 0, 1)) piece.y++;
+    else lock();
+    lastTime = ts;
+  }
+  draw();
+  animId = requestAnimationFrame(loop);
+}
+
+function drawBlock(c, x, y, size, context) {
+  context.fillStyle = COLORS[c];
+  context.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
+  context.fillStyle = 'rgba(255,255,255,0.15)';
+  context.fillRect(x * size + 1, y * size + 1, size - 2, 4);
+  context.fillStyle = 'rgba(0,0,0,0.2)';
+  context.fillRect(x * size + 1, y * size + size - 5, size - 2, 4);
+}
+
+function ghostY() {
+  let dy = 0;
+  while (valid(piece, 0, dy + 1)) dy++;
+  return piece.y + dy;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // grid
+  ctx.strokeStyle = '#1e1e30';
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    ctx.strokeRect(c * BLOCK, r * BLOCK, BLOCK, BLOCK);
+  }
+
+  // board
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (board[r][c]) drawBlock(board[r][c], c, r, BLOCK, ctx);
+
+  // ghost
+  const gy = ghostY();
+  for (let r = 0; r < piece.shape.length; r++)
+    for (let c = 0; c < piece.shape[r].length; c++)
+      if (piece.shape[r][c]) {
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fillRect((piece.x + c) * BLOCK + 1, (gy + r) * BLOCK + 1, BLOCK - 2, BLOCK - 2);
+      }
+
+  // active piece
+  for (let r = 0; r < piece.shape.length; r++)
+    for (let c = 0; c < piece.shape[r].length; c++)
+      if (piece.shape[r][c]) drawBlock(piece.type, piece.x + c, piece.y + r, BLOCK, ctx);
+
+  // next
+  nextCtx.clearRect(0, 0, 100, 100);
+  const ns = nextPiece.shape;
+  const nb = 20;
+  const ox = Math.floor((5 - ns[0].length) / 2);
+  const oy = Math.floor((5 - ns.length) / 2);
+  for (let r = 0; r < ns.length; r++)
+    for (let c = 0; c < ns[r].length; c++)
+      if (ns[r][c]) drawBlock(nextPiece.type, ox + c, oy + r, nb, nextCtx);
+}
+
+function updateUI() {
+  document.getElementById('score').textContent = score.toLocaleString();
+  document.getElementById('level').textContent = level;
+  document.getElementById('lines').textContent = lines;
+}
+
+function showGameOver() {
+  gameOver = true;
+  const msg = document.getElementById('message');
+  document.getElementById('msg-title').textContent = 'Game Over';
+  document.getElementById('msg-score').textContent = score.toLocaleString() + ' pts';
+  document.getElementById('msg-sub').textContent = 'Enterキーでリスタート';
+  msg.style.display = 'block';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { init(); return; }
+  if (e.key === 'p' || e.key === 'P') {
+    if (gameOver) return;
+    paused = !paused;
+    if (!paused) { lastTime = performance.now(); animId = requestAnimationFrame(loop); }
+    return;
+  }
+  if (gameOver || paused) return;
+  switch (e.key) {
+    case 'ArrowLeft':  if (valid(piece, -1)) piece.x--; break;
+    case 'ArrowRight': if (valid(piece,  1)) piece.x++; break;
+    case 'ArrowDown':
+      if (valid(piece, 0, 1)) { piece.y++; score += 1; updateUI(); }
+      break;
+    case 'ArrowUp': {
+      const rot = rotate(piece.shape);
+      if (valid(piece, 0, 0, rot)) piece.shape = rot;
+      else if (valid(piece, 1, 0, rot)) { piece.shape = rot; piece.x++; }
+      else if (valid(piece, -1, 0, rot)) { piece.shape = rot; piece.x--; }
+      break;
+    }
+    case ' ': e.preventDefault(); hardDrop(); break;
+  }
+  draw();
+});
+
+init();
+</script>
+</body>
+</html>
