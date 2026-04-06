@@ -46,14 +46,22 @@
       font-weight: bold;
       color: #fff;
     }
-    #next-canvas {
+    #hold-canvas, #next-canvas {
       display: block;
       margin: 0 auto;
+    }
+    #hold-box {
+      border-color: #444;
+      transition: border-color 0.2s;
+    }
+    #hold-box.used {
+      border-color: #333;
+      opacity: 0.5;
     }
     #controls {
       font-size: 11px;
       color: #666;
-      line-height: 1.8;
+      line-height: 1.9;
     }
     #controls span {
       color: #aaa;
@@ -73,12 +81,28 @@
     #message h2 { font-size: 22px; margin-bottom: 12px; }
     #message p { color: #aaa; font-size: 13px; }
     #message .score-disp { font-size: 28px; color: #ffd700; margin: 8px 0; }
+
+    /* コンボ表示 */
+    #combo-display {
+      position: absolute;
+      pointer-events: none;
+      font-size: 18px;
+      font-weight: bold;
+      font-family: 'Courier New', monospace;
+      text-shadow: 0 0 10px currentColor;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
   </style>
 </head>
 <body>
 <div id="game-container">
   <canvas id="board" width="300" height="600"></canvas>
   <div id="side-panel">
+    <div class="panel-box" id="hold-box">
+      <h3>Hold <span style="color:#555;font-size:9px">( C )</span></h3>
+      <canvas id="hold-canvas" width="100" height="100"></canvas>
+    </div>
     <div class="panel-box">
       <h3>Next</h3>
       <canvas id="next-canvas" width="100" height="100"></canvas>
@@ -86,6 +110,10 @@
     <div class="panel-box">
       <h3>Score</h3>
       <div class="value" id="score">0</div>
+    </div>
+    <div class="panel-box">
+      <h3>Combo</h3>
+      <div class="value" id="combo">x1</div>
     </div>
     <div class="panel-box">
       <h3>Level</h3>
@@ -101,10 +129,13 @@
       <span>↑</span> 回転<br>
       <span>↓</span> 落下<br>
       <span>Space</span> 即落下<br>
+      <span>C</span> ホールド<br>
       <span>P</span> 一時停止
     </div>
   </div>
 </div>
+
+<div id="combo-display"></div>
 
 <div id="message">
   <h2 id="msg-title">Game Over</h2>
@@ -140,12 +171,17 @@ const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
 const nextCtx = nextCanvas.getContext('2d');
+const holdCanvas = document.getElementById('hold-canvas');
+const holdCtx = holdCanvas.getContext('2d');
 
-let board, piece, nextPiece, score, level, lines, gameOver, paused, dropInterval, lastTime, animId;
+let board, piece, nextPiece, holdPiece, holdUsed;
+let score, level, lines, combo, gameOver, paused, dropInterval, lastTime, animId;
+let comboTimer = null;
 
 function init() {
   board = Array.from({length: ROWS}, () => Array(COLS).fill(0));
-  score = 0; level = 1; lines = 0;
+  score = 0; level = 1; lines = 0; combo = 0;
+  holdPiece = null; holdUsed = false;
   gameOver = false; paused = false;
   dropInterval = 800;
   lastTime = 0;
@@ -153,6 +189,8 @@ function init() {
   nextPiece = spawnPiece();
   updateUI();
   document.getElementById('message').style.display = 'none';
+  document.getElementById('hold-box').classList.remove('used');
+  holdCtx.clearRect(0, 0, 100, 100);
   if (animId) cancelAnimationFrame(animId);
   animId = requestAnimationFrame(loop);
 }
@@ -185,6 +223,44 @@ function valid(p, dx=0, dy=0, shape=null) {
   return true;
 }
 
+// ホールド機能
+function doHold() {
+  if (holdUsed) return;
+  holdUsed = true;
+
+  if (holdPiece === null) {
+    holdPiece = { type: piece.type, shape: SHAPES[piece.type].map(r => [...r]) };
+    piece = nextPiece;
+    nextPiece = spawnPiece();
+  } else {
+    const tmp = { type: piece.type, shape: SHAPES[piece.type].map(r => [...r]) };
+    piece = {
+      type: holdPiece.type,
+      shape: SHAPES[holdPiece.type].map(r => [...r]),
+      x: Math.floor(COLS / 2) - Math.floor(SHAPES[holdPiece.type][0].length / 2),
+      y: 0
+    };
+    holdPiece = tmp;
+  }
+
+  document.getElementById('hold-box').classList.add('used');
+  drawHold();
+
+  if (!valid(piece)) { showGameOver(); }
+}
+
+function drawHold() {
+  holdCtx.clearRect(0, 0, 100, 100);
+  if (!holdPiece) return;
+  const hs = holdPiece.shape;
+  const nb = 20;
+  const ox = Math.floor((5 - hs[0].length) / 2);
+  const oy = Math.floor((5 - hs.length) / 2);
+  for (let r = 0; r < hs.length; r++)
+    for (let c = 0; c < hs[r].length; c++)
+      if (hs[r][c]) drawBlock(holdPiece.type, ox + c, oy + r, nb, holdCtx);
+}
+
 function lock() {
   for (let r = 0; r < piece.shape.length; r++)
     for (let c = 0; c < piece.shape[r].length; c++)
@@ -195,6 +271,8 @@ function lock() {
   clearLines();
   piece = nextPiece;
   nextPiece = spawnPiece();
+  holdUsed = false;
+  document.getElementById('hold-box').classList.remove('used');
   if (!valid(piece)) { showGameOver(); }
 }
 
@@ -208,13 +286,50 @@ function clearLines() {
     }
   }
   if (cleared) {
+    // コンボ加算
+    combo++;
     const pts = [0, 100, 300, 500, 800];
-    score += (pts[cleared] || 800) * level;
+    const base = (pts[cleared] || 800) * level;
+    const comboMult = 1 + (combo - 1) * 0.5; // x1, x1.5, x2, x2.5 ...
+    const gained = Math.floor(base * comboMult);
+    score += gained;
     lines += cleared;
     level = Math.floor(lines / 10) + 1;
     dropInterval = Math.max(100, 800 - (level - 1) * 70);
-    updateUI();
+    showComboPopup(combo, cleared, gained);
+  } else {
+    // ラインを消せなかったらコンボリセット
+    combo = 0;
   }
+  updateUI();
+}
+
+function showComboPopup(c, cleared, pts) {
+  const el = document.getElementById('combo-display');
+  if (comboTimer) clearTimeout(comboTimer);
+
+  const rect = canvas.getBoundingClientRect();
+  el.style.left = (rect.left + rect.width / 2 - 60) + 'px';
+  el.style.top  = (rect.top  + rect.height / 2 - 40) + 'px';
+
+  const lineNames = ['', 'Single', 'Double', 'Triple', 'Tetris!'];
+  const comboColors = ['#fff','#7fff7f','#ffdf00','#ff9900','#ff4444'];
+  const color = comboColors[Math.min(c - 1, 4)];
+
+  let html = `<span style="color:${color};font-size:16px">${lineNames[cleared] || 'Tetris!'}</span>`;
+  if (c >= 2) html += `<br><span style="color:#ffd700;font-size:22px">COMBO x${c}!</span>`;
+  html += `<br><span style="color:#fff;font-size:13px">+${pts.toLocaleString()}</span>`;
+
+  el.innerHTML = html;
+  el.style.opacity = '1';
+  el.style.transform = 'translateY(0)';
+  el.style.transition = 'opacity 0.1s, transform 0.1s';
+
+  comboTimer = setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(-20px)';
+    el.style.transition = 'opacity 0.6s, transform 0.6s';
+  }, 800);
 }
 
 function hardDrop() {
@@ -291,6 +406,15 @@ function updateUI() {
   document.getElementById('score').textContent = score.toLocaleString();
   document.getElementById('level').textContent = level;
   document.getElementById('lines').textContent = lines;
+
+  const comboEl = document.getElementById('combo');
+  if (combo >= 2) {
+    comboEl.textContent = 'x' + combo;
+    comboEl.style.color = combo >= 4 ? '#ff4444' : combo >= 3 ? '#ff9900' : '#ffd700';
+  } else {
+    comboEl.textContent = 'x1';
+    comboEl.style.color = '#fff';
+  }
 }
 
 function showGameOver() {
@@ -325,6 +449,7 @@ document.addEventListener('keydown', e => {
       break;
     }
     case ' ': e.preventDefault(); hardDrop(); break;
+    case 'c': case 'C': doHold(); break;
   }
   draw();
 });
